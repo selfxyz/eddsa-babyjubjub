@@ -2,7 +2,7 @@
 // !#[deny(unsafe_code)]
 
 use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::{AdditiveGroup, BigInteger, PrimeField, Zero};
+use ark_ff::{AdditiveGroup, BigInteger, PrimeField, ToConstraintField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use num_bigint::BigUint;
 use rand::{CryptoRng, Rng};
@@ -35,15 +35,16 @@ impl EdDSAPrivateKey {
         Self(bytes)
     }
 
-    /// Hash the private key using Blake3 to derive the actual signing key.
+    /// Hash the private key using Blake2b to derive the actual signing key.
     /// Low 32 bytes are used to derive the scalar signing key.
     /// High 32 bytes are used to derive the nonce.
     fn hash_blake(&self) -> [u8; 64] {
-        let mut hasher = blake3::Hasher::new();
+        use blake2::{Blake2b512, Digest};
+        let mut hasher = Blake2b512::new();
         hasher.update(&self.0);
-        let mut r = hasher.finalize_xof();
-        let mut output = [0u8; 64]; // 512 bits to get no bias when doing mod reduction
-        r.fill(&mut output);
+        let result = hasher.finalize();
+        let mut output = [0u8; 64];
+        output.copy_from_slice(&result);
         output
     }
 
@@ -68,21 +69,22 @@ impl EdDSAPrivateKey {
     pub fn public(&self) -> EdDSAPublicKey {
         let out = self.hash_blake();
         let sk = Self::derive_sk(&out);
-        let pk = (Affine::generator() * sk).into_affine();
+        let pk = (Affine::generator() * (sk / (ScalarField::from(8u8)))).into_affine();
         EdDSAPublicKey { pk }
     }
 
     /// This function produces a nonce deterministically from the message and the secret key.
     ///
     /// This is a standard technique to avoid nonce reuse and to make the signature deterministic.
-    fn deterministic_nonce(message: BaseField, sk: ScalarField) -> ScalarField {
+    fn deterministic_nonce(message: BaseField, sk_bytes: &[u8]) -> ScalarField {
+        use blake2::{Blake2b512, Digest};
         // We hash the private key and the message to produce the nonce r
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&sk.into_bigint().to_bytes_le());
+        let mut hasher = Blake2b512::new();
+        hasher.update(&sk_bytes);
         hasher.update(&message.into_bigint().to_bytes_le());
-        let mut r = hasher.finalize_xof();
+        let result = hasher.finalize();
         let mut output = [0u8; 64]; // 512 bits to get no bias when doing mod reduction
-        r.fill(&mut output);
+        output.copy_from_slice(&result);
         ScalarField::from_le_bytes_mod_order(&output)
     }
 
@@ -90,20 +92,18 @@ impl EdDSAPrivateKey {
     ///
     /// The message should be hashed to a BaseField element if it is not encodable as one before signing.
     pub fn sign(&self, message: BaseField) -> EdDSASignature {
-        let out = self.hash_blake();
-        let sk = Self::derive_sk(&out);
-        let nonce_secret = ScalarField::from_le_bytes_mod_order(&out[32..64]);
+        let hash = self.hash_blake(); //this is fine
+        let s = Self::derive_sk(&hash);
+        let a = Affine::generator() * (s / ScalarField::from(8u8));
 
-        let r = Self::deterministic_nonce(message, nonce_secret);
-        let nonce_r = Affine::generator() * r;
+        let r = Self::deterministic_nonce(message, &hash[32..64]);
+        let r8 = Affine::generator() * r;
+        let hm = challenge_hash(message, r8.into_affine(),a.into_affine());
 
-        let pk = Affine::generator() * sk;
-        let challenge = challenge_hash(message, nonce_r.into_affine(), pk.into_affine());
-        let c = convert_base_to_scalar(challenge);
-        let s = r + c * sk;
+        let s = r + convert_base_to_scalar(hm) * s;
 
         EdDSASignature {
-            r: nonce_r.into_affine(),
+            r: r8.into_affine(), 
             s,
         }
     }
@@ -147,15 +147,11 @@ impl EdDSAPublicKey {
         // All deserialization routines need to ensure that only canonical field elements are accepted.
 
         // 4. Compute the hash and reduce it mod the scalar field order L
-        let challenge = challenge_hash(message, signature.r, self.pk);
-        let c = convert_base_to_scalar(challenge);
-        // 5. Accept if 8*(s*G) = 8*R + 8*(c*Pk)
-        // Implemented by checking that 8(s*G - R - c*Pk) = 0, according to Section 4 of the above paper.
-        let mut v = (Affine::generator() * signature.s) - signature.r - (self.pk * c);
-        // multiply by the cofactor 8
-        v.double_in_place();
-        v.double_in_place();
-        v.double_in_place();
+        let hm = challenge_hash(message, signature.r, self.pk);
+        let c = convert_base_to_scalar(hm);
+        // 5. Accept if (s*G) = R + (8*c*Pk)
+        // Implemented by checking that (s*G - R - 8*c*Pk) = 0, according to Section 4 of the above paper.
+        let v = (Affine::generator() * signature.s) - signature.r - (self.pk * c * ScalarField::from(8u8));
         v.is_zero()
     }
 
@@ -187,13 +183,6 @@ pub struct EdDSASignature {
 }
 
 impl EdDSASignature {
-    const CHALL_DS: &[u8] = b"EdDSA Signature";
-
-    // Returns the domain separator for the challenge hash as a field element
-    fn get_chall_ds() -> BaseField {
-        BaseField::from_be_bytes_mod_order(Self::CHALL_DS)
-    }
-
     /// Expose the signature as a byte array.
     pub fn to_compressed_bytes(&self) -> eyre::Result<[u8; 64]> {
         let mut buf = Vec::new();

@@ -15,7 +15,6 @@ ark-ec = { workspace = true }
 ark-ff = { workspace = true }
 ark-serde-compat = { workspace = true }
 ark-serialize = { workspace = true }
-blake3 = { workspace = true }
 eyre = { workspace = true }
 num-bigint.workspace = true
 poseidon2 = { workspace = true, features = ["bn254", "t8"] }
@@ -23,3 +22,4 @@ rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 zeroize = { workspace = true }
 poseidon-ark = { git = "https://github.com/selfxyz/poseidon-ark" }
+blake2 = "0.10.6"
