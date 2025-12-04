@@ -214,14 +214,11 @@ impl EdDSASignature {
 
 fn challenge_hash(message: BaseField, nonce_r: Affine, pk: Affine) -> BaseField {
     poseidon_ark::Poseidon::new().hash(vec![
-        EdDSASignature::get_chall_ds(), // Domain separator in capacity element
         nonce_r.x,
         nonce_r.y,
         pk.x,
         pk.y,
-        message,
-        BaseField::zero(),
-        BaseField::zero(),
+        message
     ]).unwrap() // safe to do it only returns err if input length is invalid
 }
 
