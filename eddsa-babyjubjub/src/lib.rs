@@ -213,7 +213,7 @@ impl EdDSASignature {
 }
 
 fn challenge_hash(message: BaseField, nonce_r: Affine, pk: Affine) -> BaseField {
-    poseidon2::bn254::t8::permutation(&[
+    poseidon_ark::Poseidon::new().hash(vec![
         EdDSASignature::get_chall_ds(), // Domain separator in capacity element
         nonce_r.x,
         nonce_r.y,
@@ -222,7 +222,7 @@ fn challenge_hash(message: BaseField, nonce_r: Affine, pk: Affine) -> BaseField 
         message,
         BaseField::zero(),
         BaseField::zero(),
-    ])[1]
+    ]).unwrap() // safe to do it only returns err if input length is invalid
 }
 
 // This is just a modular reduction. We show in the docs why this does not introduce a bias when applied to a uniform element of the base field.
